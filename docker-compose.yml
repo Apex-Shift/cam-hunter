@@ -1,0 +1,17 @@
+version: '3.8'
+
+services:
+  cam-hunter:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: cam_hunter_framework
+    # Mandatory flags to keep the interactive CLI loop and the Tab auto-completion alive inside Docker
+    stdin_open: true
+    tty: true
+    # Mapping a persistent volume to save your HTML dashboards and log outputs on your local host
+    volumes:
+      - ./reports:/app/reports
+    # Ensure network bridges match host definitions for scanning local subnets dynamically
+    network_mode: "host"
+    restart: "no"
