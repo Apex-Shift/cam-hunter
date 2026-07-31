@@ -3,6 +3,7 @@
 Cam Hunter is an elite, modular, and asynchronous penetration testing framework engineered to identify, verify, and exploit critical vulnerabilities on video surveillance infrastructure (IP cameras, DVR/NVR/XVR recorders) and network storage ecosystems (NAS). 
 
 Equipped with **61 dynamically loaded modules**, it acts as a comprehensive, localized threat-assessment suite featuring both an interactive CLI console and a hardware-accelerated dark theme desktop application.
+<img width="721" height="279" alt="cli" src="https://github.com/user-attachments/assets/e044285e-3c19-4682-9587-f3e8a6908aed" />
 
 ---
 
