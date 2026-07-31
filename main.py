@@ -1,6 +1,10 @@
 import asyncio
 import sys
 import os
+import shlex
+import threading
+import tempfile
+from html import escape
 
 # Define the local command history log location
 HISTORY_FILE = os.path.expanduser("~/.cam_hunter_history")
@@ -26,6 +30,7 @@ except ImportError:
 
 from core.loader import ModuleLoader
 
+
 def save_terminal_history():
     """
     Saves the user command shell history persistently across console sessions.
@@ -36,13 +41,14 @@ def save_terminal_history():
         except Exception:
             pass
 
+
 def print_banner(modules_count):
     """
     Renders the modern stylized CAM HUNTER application banner layout.
     """
     print("\033[1;34m" + "="*57 + "\033[0m")
     print("\033[1;36m   ____    _    _  _   _   _ _   _ _   _ _____ _____ ____  ")
-    print("  / ___|  / \\  | \\| | | | | | | | | \\ | |_   _| ____|  _ \\ ")
+    print("  / ___|  / \\  | \\| | | | | | | | \\ | |_   _| ____|  _ \\ ")
     print(" | |     / _ \\ | . ` | | |_| | | | |  \\| | | | |  _| | |_) |")
     print(" | |___ / ___ \\| |\\  | |  _  | |_| | |\\  | | | | |___|  _ < ")
     print("  \\____/_/   \\_\\_| \\_| |_| |_|\\___/|_| \\_| |_| |_____|_| \\_\\ \033[0m")
@@ -50,6 +56,7 @@ def print_banner(modules_count):
     print(f"         [{modules_count} modules loaded dynamically]")
     print("\033[1;34m" + "="*57 + "\033[0m")
     print("\033[1;33m -> Type 'help' or 'h' to review advanced power shortcuts.\033[0m\n")
+
 
 def print_help_menu():
     """
@@ -67,6 +74,7 @@ def print_help_menu():
     print("  \033[1;32mback\033[0m                      Unload active context and return to absolute root prompt.")
     print("  \033[1;32mexit\033[0m                      Terminate framework runtime execution loops safely.")
     print("\033[1;35m* SHORTCUTS NOTE: Press [TAB] to trigger dynamic auto-completion suggestions anytime.\033[0m\n")
+
 
 def generate_html_report():
     """
@@ -88,16 +96,25 @@ def generate_html_report():
             for line in f:
                 if "TARGET:" in line and "STATUS:" in line:
                     parts = line.strip().split(" | ")
-                    mod_part = parts[0].replace("[", "").replace("]", "")
-                    target_part = parts[1].replace("TARGET: ", "")
-                    status_part = parts[2].replace("STATUS: ", "")
-                    details_part = parts[3].replace("DETAILS: ", "")
+                    if len(parts) < 4:
+                        continue
+                    mod_part_raw = parts[0].replace("[", "").replace("]", "")
+                    target_part_raw = parts[1].replace("TARGET: ", "")
+                    status_part_raw = parts[2].replace("STATUS: ", "")
+                    details_part_raw = parts[3].replace("DETAILS: ", "")
                     
-                    unique_targets.add(target_part)
-                    unique_modules.add(mod_part)
+                    # Track unique counts using raw values
+                    unique_targets.add(target_part_raw)
+                    unique_modules.add(mod_part_raw)
                     total_success += 1
+
+                    # Escape values before embedding into HTML to avoid XSS
+                    mod_part = escape(mod_part_raw)
+                    target_part = escape(target_part_raw)
+                    status_part = escape(status_part_raw)
+                    details_part = escape(details_part_raw)
                     
-                    badge_color = "#00ff66" if status_part == "SUCCESS" else "#ff3333"
+                    badge_color = "#00ff66" if status_part_raw == "SUCCESS" else "#ff3333"
                     
                     table_rows += f"""
                     <tr>
@@ -164,10 +181,26 @@ def generate_html_report():
 </html>
 """
     try:
-        with open(html_file, "w", encoding="utf-8") as f:
-            f.write(html_template)
+        # Ensure reports directory exists
+        os.makedirs(os.path.dirname(html_file), exist_ok=True)
+        # Atomic write to avoid partial writes / corruption
+        dir_name = os.path.dirname(html_file) or '.'
+        fd, tmp_path = tempfile.mkstemp(dir=dir_name, prefix="dashboard-", suffix=".html")
+        try:
+            with os.fdopen(fd, 'w', encoding='utf-8') as tmpf:
+                tmpf.write(html_template)
+            os.replace(tmp_path, html_file)
+        finally:
+            # If tmp_path still exists (on error), attempt to remove
+            if os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except Exception:
+                    pass
     except Exception as e:
         print(f"[-] Dashboard write failure: {e}")
+
+
 def save_result_to_log(module_name, target, result):
     """
     Automatically tracks critical discoveries and refreshes the live HTML dashboard view.
@@ -178,11 +211,22 @@ def save_result_to_log(module_name, target, result):
     is_vuln = isinstance(result, dict) and (result.get("vulnerable") or result.get("success"))
     
     if is_vuln:
-        details = result.get("details", "").replace("\n", " ")
-        with open(log_file, "a", encoding="utf-8") as f:
-            f.write(f"[{module_name.upper()}] | TARGET: {target} | STATUS: SUCCESS | DETAILS: {details}\n")
+        details = str(result.get("details", "")).replace("\n", " ")
+        # Append structured line to the log file
+        try:
+            with open(log_file, "a", encoding="utf-8") as f:
+                f.write(f"[{module_name.upper()}] | TARGET: {target} | STATUS: SUCCESS | DETAILS: {details}\n")
+        except Exception as e:
+            print(f"[-] Failed to write vulnerability log: {e}")
+            return
+
         print(f"\033[1;33m[+] Finding logged. HTML Dashboard refreshed inside 'reports/dashboard.html'\033[0m")
-        generate_html_report()
+        # Refresh dashboard in background to avoid blocking CLI
+        try:
+            t = threading.Thread(target=generate_html_report, daemon=True)
+            t.start()
+        except Exception as e:
+            print(f"[-] Failed to spawn dashboard update thread: {e}")
 
 class Completer:
     """
@@ -210,6 +254,7 @@ class Completer:
         except IndexError:
             return None
 
+
 async def run_global_vulnscan(modules_registry, target, port_fallback="80"):
     """
     Global pipeline loop: Executes all scanning modules sequentially against a target host.
@@ -228,6 +273,7 @@ async def run_global_vulnscan(modules_registry, target, port_fallback="80"):
                 module.options["PORT"]["value"] = port_fallback
 
         try:
+            # Consider adding asyncio.wait_for(module.run(), timeout=...) in future
             result = await module.run()
             if isinstance(result, dict) and result.get("vulnerable"):
                 print(f"  \033[1;31m[VULNERABLE] -> {result.get('details', 'Vulnerability signature confirmed.')}\033[0m")
@@ -240,6 +286,7 @@ async def run_global_vulnscan(modules_registry, target, port_fallback="80"):
             
     print("\033[1;34m" + "-"*57 + "\033[0m")
     print(f"\033[1;35m[+] GLOBAL CYCLES TERMINATED. Total vulnerabilities flagged: {vulnerabilities_detected}\033[0m\n")
+
 
 async def cli():
     loader = ModuleLoader()
@@ -261,11 +308,17 @@ async def cli():
             module_name = current_module.name if current_module else "none"
             prompt = f"\033[1;31mcam-hunter\033[0m(\033[1;33m{module_name}\033[0m) > "
             
-            user_input = input(prompt).strip()
-            if not user_input:
+            user_input_raw = input(prompt).strip()
+            if not user_input_raw:
                 continue
 
-            cmd = user_input.split()
+            # Use shlex.split to respect quoted arguments
+            try:
+                cmd = shlex.split(user_input_raw)
+            except Exception:
+                # Fall back to simple split on error
+                cmd = user_input_raw.split()
+
             action = cmd[0].lower()
 
             # Global command check: EXIT
@@ -394,6 +447,7 @@ async def cli():
             print("\n\033[1;33m[*] Interruption request parsed. Standard input aborted. Type 'exit' to terminate.\033[0m")
         except Exception as e:
             print(f"\033[1;31m[!] Framework core exception thrown : {e}\033[0m")
+
 
 if __name__ == "__main__":
     asyncio.run(cli())
